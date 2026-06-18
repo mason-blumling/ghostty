@@ -6,14 +6,14 @@ upstream_repo=https://github.com/ghostty-org/ghostty
 upstream_ref=main
 upstream_sha=42fcd58dba54c2a0404c1c3d73c7d44081fac836
 upstream_describe=v1.3.1-1104-g42fcd58db
-fork_version=0.2.2
-version_string=0.2.2+ghostty.1.3.2-dev.g42fcd58
+fork_version=0.3.0
+version_string=0.3.0+ghostty.1.3.2-dev.g42fcd58
 synced_at=2026-06-05
 
 # Notes:
 # - Anchored to upstream dev HEAD (1.3.2-dev line), 1104 commits past the v1.3.1
-#   release tag — i.e. latest upstream + the 4 fork patches, intentionally NOT
+#   release tag — i.e. latest upstream + the 5 fork patches, intentionally NOT
 #   pinned to an older release tag.
-# - Built on a public-Xcode macOS runner (the build farm); the four fork-added
-#   C symbols (ghostty_surface_{set_data_callback,send_input_raw,read_cells,free_cells})
+# - Built on a macOS GitHub Actions runner (public Xcode); the five fork-added
+#   C symbols (ghostty_surface_{set_data_callback,send_input_raw,read_cells,free_cells,write_scrollback})
 #   were verified present in the shipped framework.
