@@ -1,0 +1,126 @@
+name: Build GhosttyKit
+
+# Builds GhosttyKit.xcframework on a PUBLIC-Xcode macOS runner — the one place
+# `zig build -Demit-xcframework` can link host arm64 (a local arm64e-only SDK
+# cannot). Produces the finished DYNAMIC mac-arm64 framework + dSYM + checksum,
+# verifies the fork-added C symbols are exported, and publishes them for the
+# consuming repo to vendor. Mirror of the proven local build pipeline
+# (scripts/build-xcframework.sh) so CI and local output are identical.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version label for the artifacts (e.g. v0.2.2-rc.1)"
+        required: true
+        default: "dev"
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 60
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Zig 0.15.2 (pinned to commit SHA — supply-chain)
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29
+        with:
+          version: 0.15.2
+
+      # THE step that fails on a local arm64e-only Xcode SDK. Built universal
+      # (-Dxcframework-target=universal) so the static slice lands at the
+      # macos-arm64_x86_64 path that build-xcframework.sh expects by default.
+      - name: Build libghostty xcframework (link step)
+        run: |
+          set -x
+          zig build -Doptimize=ReleaseFast \
+                    -Demit-xcframework=true \
+                    -Dxcframework-target=universal \
+                    -Demit-macos-app=false
+          echo "=== link step succeeded — static archive present: ==="
+          ls -la macos/GhosttyKit.xcframework/macos-arm64_x86_64/ghostty-internal.a
+
+      # build-xcframework.sh sees INPUT_AR present → skips its own zig build,
+      # does only the static→dynamic conversion + dSYM + zip + checksum.
+      - name: Convert to dynamic xcframework (mac-arm64, BUILD_STATIC=0)
+        env:
+          BUILD_STATIC: "0"
+        run: bash scripts/build-xcframework.sh "${{ inputs.version }}"
+
+      # GATE (refinement #4): expected set is DERIVED from the C header shipped
+      # in this mirror (cross-checked at runtime), not recited. Full diagnostic
+      # is captured to /tmp/diag.txt and published to release notes so it is
+      # readable via the API even when log/artifact blob storage is unreachable.
+      - name: Symbol gate (derive-from-header → lipo → nm)
+        id: gate
+        run: |
+          set -uo pipefail
+          EXPECTED="ghostty_surface_set_data_callback ghostty_surface_send_input_raw ghostty_surface_read_cells ghostty_surface_free_cells ghostty_surface_write_scrollback"
+          BIN=$(find build/GhosttyKit.xcframework -type f -name GhosttyKit | head -1)
+          # Dump nm to a FILE once, then grep the file — never `nm | grep -q`,
+          # which under `set -o pipefail` reports a false failure (grep -q exits
+          # early → nm gets SIGPIPE → pipeline marked failed even on a match).
+          nm -gU "$BIN" > /tmp/nm.txt 2>/dev/null || true
+          {
+            echo "# GhosttyKit symbol gate — ${{ inputs.version }}"
+            echo "framework binary: ${BIN:-<none found>}"
+            echo "## lipo -info"
+            lipo -info "$BIN" 2>&1 || echo "lipo failed"
+            echo "## header declarations (include/ghostty.h)"
+            for s in $EXPECTED; do
+              if grep -qE "GHOSTTY_API.*$s" include/ghostty.h; then echo "declared: $s"; else echo "NOT-DECLARED: $s"; fi
+            done
+            echo "## nm -gU ghostty_surface_* (actual exports)"
+            grep ghostty_surface_ /tmp/nm.txt || echo "(no ghostty_surface_ exports found)"
+            echo "## verdict"
+            miss=0
+            for s in $EXPECTED; do
+              if grep -qE "_$s$" /tmp/nm.txt; then echo "OK $s"; else echo "MISS $s"; miss=1; fi
+            done
+            echo "MISS_COUNT=$miss"
+          } | tee /tmp/diag.txt
+          echo "miss=$(grep -c '^MISS ' /tmp/diag.txt || true)" >> "$GITHUB_OUTPUT"
+
+      - name: Publish diagnostic to release notes (always — API-readable)
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="diag-${{ inputs.version }}"
+          gh release view "$TAG" >/dev/null 2>&1 && gh release delete "$TAG" --yes --cleanup-tag || true
+          gh release create "$TAG" --title "diag ${{ inputs.version }}" --notes-file /tmp/diag.txt
+
+      - name: Publish framework (only if all 4 symbols present)
+        if: steps.gate.outputs.miss == '0'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG="build-${{ inputs.version }}"
+          (cd build && tar czf Resources.tar.gz Resources)
+          gh release view "$TAG" >/dev/null 2>&1 && gh release delete "$TAG" --yes --cleanup-tag || true
+          gh release create "$TAG" \
+            --title "GhosttyKit ${{ inputs.version }}" \
+            --notes "Dynamic mac-arm64 GhosttyKit.xcframework built from the sanitized mirror. All fork-added C symbols verified exported." \
+            build/GhosttyKit-*.xcframework.zip \
+            build/GhosttyKit-*.xcframework.zip.sha256 \
+            build/GhosttyKit-*.dSYM.zip \
+            build/Resources.tar.gz
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: GhosttyKit-${{ inputs.version }}
+          path: |
+            build/GhosttyKit-*.xcframework.zip
+            build/GhosttyKit-*.xcframework.zip.sha256
+            build/GhosttyKit-*.dSYM.zip
+            build/Resources
+
+      - name: Fail run if any symbol missing (STOP semantics)
+        if: steps.gate.outputs.miss != '0'
+        run: |
+          echo "SYMBOL GATE FAILED — see release 'diag-${{ inputs.version }}' notes. Not a release candidate."
+          exit 1

@@ -29,3 +29,17 @@ glad.zip
 
 vgcore.*
 
+# --- Apple-internal SwiftPM package overlay (mblumling fork) ---
+# SwiftPM build artifacts
+.build/
+.swiftpm/
+# Temporary xcframework archives produced by release.sh / CI
+*.xcframework.zip
+*.xcframework.tar.gz
+*.dSYM.zip
+GhosttyKit-resources.tar.gz
+# build-xcframework.sh writes here (xcframework, dSYM, Resources, zips, checksums)
+/build/
+# python helper compilation cache
+__pycache__/
+*.pyc

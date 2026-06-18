@@ -71,6 +71,16 @@ app: *App,
 rt_app: *apprt.runtime.App,
 rt_surface: *apprt.runtime.Surface,
 
+/// Optional callback that is invoked with every chunk of raw bytes received
+/// from the PTY before Ghostty's terminal emulator parses them. This is set
+/// via the embedded apprt C API (`ghostty_surface_set_data_callback`) and is
+/// used by embedders to tee the PTY stream (e.g. for mirroring to a remote
+/// terminal client). It is invoked on the termio (IO) thread; the callee is
+/// responsible for any thread hopping it needs to do, and must not call back
+/// into libghostty from within the callback.
+pty_data_cb: ?*const fn (?*anyopaque, [*]const u8, usize) callconv(.c) void = null,
+pty_data_cb_userdata: ?*anyopaque = null,
+
 /// The font structures
 font_grid_key: font.SharedGridSet.Key,
 font_size: font.face.DesiredSize,
@@ -3285,6 +3295,20 @@ pub fn textCallback(self: *Surface, text: []const u8) !void {
     defer crash.sentry.thread_state = null;
 
     try self.completeClipboardPaste(text, true);
+}
+
+/// Writes raw bytes directly to the PTY, bypassing keyboard input
+/// processing, bracketed-paste wrapping, and newline filtering. This
+/// is intended for embedders that already have fully-encoded terminal
+/// input (e.g. remote terminal clients forwarding keystrokes, arrow
+/// keys, control codes, and mouse-report escape sequences) and need
+/// those bytes delivered verbatim to the child process.
+pub fn sendInputRaw(self: *Surface, bytes: []const u8) !void {
+    crash.sentry.thread_state = self.crashThreadState();
+    defer crash.sentry.thread_state = null;
+
+    if (bytes.len == 0) return;
+    self.queueIo(try termio.Message.writeReq(self.alloc, bytes), .unlocked);
 }
 
 /// Callback for when the surface is fully visible or not, regardless

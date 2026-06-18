@@ -1681,6 +1681,284 @@ pub const CAPI = struct {
         ptr.deinit();
     }
 
+    // ghostty_cell_s
+    const CellOut = extern struct {
+        codepoint: u32,
+        fg_rgb: u32,
+        bg_rgb: u32,
+        flags: u16,
+        _reserved: u16,
+    };
+
+    // ghostty_cells_s
+    const Cells = extern struct {
+        cells: ?[*]CellOut,
+        cells_len: usize,
+        cols: u32,
+        rows: u32,
+        cursor_x: u32,
+        cursor_y: u32,
+        default_fg: u32,
+        default_bg: u32,
+        cursor_visible: bool,
+        alt_screen: bool,
+        cursor_keys: bool,
+        bracketed_paste: bool,
+        focus_event: bool,
+        mouse_event: u16,
+        mouse_format: u16,
+    };
+
+    const CellFlag = struct {
+        const bold: u16 = 1 << 0;
+        const italic: u16 = 1 << 1;
+        const faint: u16 = 1 << 2;
+        const blink: u16 = 1 << 3;
+        const inverse: u16 = 1 << 4;
+        const invisible: u16 = 1 << 5;
+        const strike: u16 = 1 << 6;
+        const underline: u16 = 1 << 7;
+        const overline: u16 = 1 << 8;
+        const wide: u16 = 1 << 9;
+        const spacer: u16 = 1 << 10;
+    };
+
+    /// Read the current viewport as a grid of cells with resolved colors
+    /// and attribute flags. Allocates `out.cells`; caller must free with
+    /// `ghostty_surface_free_cells`.
+    export fn ghostty_surface_read_cells(
+        surface: *Surface,
+        out: *Cells,
+    ) bool {
+        const core_surface = &surface.core_surface;
+        core_surface.renderer_state.mutex.lock();
+        defer core_surface.renderer_state.mutex.unlock();
+
+        const t = core_surface.renderer_state.terminal;
+        const screen = t.screens.active;
+        const cols: u32 = @intCast(screen.pages.cols);
+        const rows: u32 = @intCast(screen.pages.rows);
+        const total: usize = @as(usize, cols) * @as(usize, rows);
+
+        const default_fg = t.colors.foreground.get() orelse
+            terminal.color.RGB{ .r = 0xff, .g = 0xff, .b = 0xff };
+        const default_bg = t.colors.background.get() orelse
+            terminal.color.RGB{ .r = 0, .g = 0, .b = 0 };
+
+        var fg_eff = default_fg;
+        var bg_eff = default_bg;
+        if (t.modes.get(.reverse_colors)) {
+            fg_eff = default_bg;
+            bg_eff = default_fg;
+        }
+
+        const palette = &t.colors.palette.current;
+
+        const out_cells = global.alloc.alloc(CellOut, total) catch {
+            out.* = .{
+                .cells = null,
+                .cells_len = 0,
+                .cols = cols,
+                .rows = rows,
+                .cursor_x = 0,
+                .cursor_y = 0,
+                .default_fg = rgbPack(fg_eff),
+                .default_bg = rgbPack(bg_eff),
+                .cursor_visible = false,
+                .alt_screen = false,
+                .cursor_keys = false,
+                .bracketed_paste = false,
+                .focus_event = false,
+                .mouse_event = 0,
+                .mouse_format = 0,
+            };
+            return false;
+        };
+        @memset(out_cells, .{
+            .codepoint = 0,
+            .fg_rgb = rgbPack(fg_eff),
+            .bg_rgb = rgbPack(bg_eff),
+            .flags = 0,
+            ._reserved = 0,
+        });
+
+        var row_it = screen.pages.rowIterator(
+            .right_down,
+            .{ .viewport = .{} },
+            null,
+        );
+        var y: usize = 0;
+        while (row_it.next()) |row_pin| : (y += 1) {
+            if (y >= rows) break;
+            const p = &row_pin.node.data;
+            const rac = row_pin.rowAndCell();
+            const row_cells = p.getCells(rac.row);
+            const len = @min(row_cells.len, cols);
+            var x: usize = 0;
+            while (x < len) : (x += 1) {
+                const page_cell = &row_cells[x];
+                const style: terminal.Style = if (page_cell.style_id > 0)
+                    p.styles.get(p.memory, page_cell.style_id).*
+                else
+                    .{};
+
+                const style_bg = style.bg(page_cell, palette);
+                const style_fg = style.fg(.{
+                    .default = fg_eff,
+                    .palette = palette,
+                });
+
+                var final_fg = style_fg;
+                var final_bg = style_bg orelse bg_eff;
+                if (style.flags.inverse) {
+                    const tmp = final_fg;
+                    final_fg = final_bg;
+                    final_bg = tmp;
+                }
+
+                var flags: u16 = 0;
+                if (style.flags.bold) flags |= CellFlag.bold;
+                if (style.flags.italic) flags |= CellFlag.italic;
+                if (style.flags.faint) flags |= CellFlag.faint;
+                if (style.flags.blink) flags |= CellFlag.blink;
+                if (style.flags.inverse) flags |= CellFlag.inverse;
+                if (style.flags.invisible) flags |= CellFlag.invisible;
+                if (style.flags.strikethrough) flags |= CellFlag.strike;
+                if (style.flags.overline) flags |= CellFlag.overline;
+                if (style.flags.underline != .none) flags |= CellFlag.underline;
+                switch (page_cell.wide) {
+                    .wide => flags |= CellFlag.wide,
+                    .spacer_tail, .spacer_head => flags |= CellFlag.spacer,
+                    .narrow => {},
+                }
+
+                out_cells[y * cols + x] = .{
+                    .codepoint = page_cell.codepoint(),
+                    .fg_rgb = rgbPack(final_fg),
+                    .bg_rgb = rgbPack(final_bg),
+                    .flags = flags,
+                    ._reserved = 0,
+                };
+            }
+        }
+
+        const cursor_visible = t.modes.get(.cursor_visible);
+        const cursor_x: u32 = @intCast(screen.cursor.x);
+        const cursor_y: u32 = @intCast(screen.cursor.y);
+
+        const alt_screen = t.modes.get(.alt_screen) or
+            t.modes.get(.alt_screen_legacy) or
+            t.modes.get(.alt_screen_save_cursor_clear_enter);
+        const cursor_keys = t.modes.get(.cursor_keys);
+        const bracketed_paste = t.modes.get(.bracketed_paste);
+        const focus_event = t.modes.get(.focus_event);
+
+        var mouse_event: u16 = 0;
+        if (t.modes.get(.mouse_event_any)) {
+            mouse_event = 1003;
+        } else if (t.modes.get(.mouse_event_button)) {
+            mouse_event = 1002;
+        } else if (t.modes.get(.mouse_event_normal)) {
+            mouse_event = 1000;
+        } else if (t.modes.get(.mouse_event_x10)) {
+            mouse_event = 9;
+        }
+
+        var mouse_format: u16 = 0;
+        if (t.modes.get(.mouse_format_sgr_pixels)) {
+            mouse_format = 1016;
+        } else if (t.modes.get(.mouse_format_sgr)) {
+            mouse_format = 1006;
+        } else if (t.modes.get(.mouse_format_urxvt)) {
+            mouse_format = 1015;
+        } else if (t.modes.get(.mouse_format_utf8)) {
+            mouse_format = 1005;
+        }
+
+        out.* = .{
+            .cells = out_cells.ptr,
+            .cells_len = total,
+            .cols = cols,
+            .rows = rows,
+            .cursor_x = cursor_x,
+            .cursor_y = cursor_y,
+            .default_fg = rgbPack(fg_eff),
+            .default_bg = rgbPack(bg_eff),
+            .cursor_visible = cursor_visible,
+            .alt_screen = alt_screen,
+            .cursor_keys = cursor_keys,
+            .bracketed_paste = bracketed_paste,
+            .focus_event = focus_event,
+            .mouse_event = mouse_event,
+            .mouse_format = mouse_format,
+        };
+        return true;
+    }
+
+    export fn ghostty_surface_free_cells(_: *Surface, ptr: *Cells) void {
+        if (ptr.cells) |p| {
+            global.alloc.free(p[0..ptr.cells_len]);
+            ptr.cells = null;
+            ptr.cells_len = 0;
+        }
+    }
+
+    /// Write already-laid-out UTF-8 text DIRECTLY into the surface's terminal
+    /// screen, advancing the cursor and scrolling earlier lines into scrollback
+    /// exactly as normal terminal output would. This is a STRUCTURED
+    /// data-structure write (not a parse, not a shell echo): it bypasses BOTH
+    /// the VT parser AND the PTY/shell.
+    ///
+    /// Collision boundary (do not violate):
+    ///   - This is NOT ghostty_surface_text()           (that re-parses bytes).
+    ///   - This is NOT ghostty_surface_send_input_raw()  (that hits the PTY/shell).
+    ///   - '\n' is the only interpreted control byte (carriage return + linefeed);
+    ///     all other bytes are laid as literal codepoints, so pass display text
+    ///     only, with escape/control sequences already stripped.
+    ///
+    /// Routes solely through Terminal.printString, the parser's own production
+    /// lay-down path (grapheme/wide/wrap/scroll, integrity-checked on every
+    /// codepoint), so injected rows are structurally indistinguishable from
+    /// normal output and cannot corrupt screen/page state that other APIs read.
+    ///
+    /// Intended for one-time scrollback restore at surface init, BEFORE the
+    /// shell connects. Requires the terminal to be configured with
+    /// max_scrollback > 0 for restored lines beyond the viewport to land in
+    /// history. Returns true on success, false on invalid UTF-8 or allocation
+    /// failure (a partial write is possible on mid-string OOM).
+    export fn ghostty_surface_write_scrollback(
+        surface: *Surface,
+        ptr: [*]const u8,
+        len: usize,
+    ) bool {
+        const core_surface = &surface.core_surface;
+
+        // Scope the lock so it is released before scheduling a render. We take
+        // the same renderer_state.mutex that ghostty_surface_read_cells takes,
+        // then route ONLY through Terminal.printString. No Stream/Parser, no
+        // PTY: this is the structured screen write, not a parse or a shell echo.
+        {
+            core_surface.renderer_state.mutex.lock();
+            defer core_surface.renderer_state.mutex.unlock();
+
+            const t = core_surface.renderer_state.terminal;
+            t.printString(ptr[0..len]) catch |err| {
+                std.log.err(
+                    "ghostty_surface_write_scrollback failed err={}",
+                    .{err},
+                );
+                return false;
+            };
+        }
+
+        surface.refresh();
+        return true;
+    }
+
+    inline fn rgbPack(c: terminal.color.RGB) u32 {
+        return (@as(u32, c.r) << 16) | (@as(u32, c.g) << 8) | @as(u32, c.b);
+    }
+
     /// Tell the surface that it needs to schedule a render
     export fn ghostty_surface_refresh(surface: *Surface) void {
         surface.refresh();
@@ -1756,6 +2034,21 @@ pub const CAPI = struct {
         surface.occlusionCallback(visible);
     }
 
+    /// Register a callback that receives every chunk of raw bytes read
+    /// from the PTY before Ghostty's terminal emulator parses them. Pass
+    /// `null` for `cb` to clear. The callback is invoked on the termio
+    /// thread; the callee is responsible for any thread hopping it needs.
+    /// The callee must not call back into libghostty from within the
+    /// callback.
+    export fn ghostty_surface_set_data_callback(
+        surface: *Surface,
+        cb: ?*const fn (?*anyopaque, [*]const u8, usize) callconv(.c) void,
+        userdata: ?*anyopaque,
+    ) void {
+        surface.core_surface.pty_data_cb = cb;
+        surface.core_surface.pty_data_cb_userdata = userdata;
+    }
+
     /// Filter the mods if necessary. This handles settings such as
     /// `macos-option-as-alt`. The filtered mods should be used for
     /// key translation but should NOT be sent back via the `_key`
@@ -1821,6 +2114,20 @@ pub const CAPI = struct {
         len: usize,
     ) void {
         surface.textCallback(ptr[0..len]);
+    }
+
+    /// Writes raw bytes directly to the surface's PTY, bypassing the
+    /// keyboard/paste pipeline. Intended for embedders that have already
+    /// encoded terminal input (keystrokes, escape sequences, mouse
+    /// reports) and need to deliver it verbatim to the child process.
+    export fn ghostty_surface_send_input_raw(
+        surface: *Surface,
+        ptr: [*]const u8,
+        len: usize,
+    ) void {
+        surface.core_surface.sendInputRaw(ptr[0..len]) catch |err| {
+            std.log.err("error sending raw input to surface err={}", .{err});
+        };
     }
 
     /// Set the preedit text for the surface. This is used for IME
@@ -2248,3 +2555,69 @@ pub const CAPI = struct {
         }
     };
 };
+
+// Tests for the structured scrollback-write primitive that
+// ghostty_surface_write_scrollback wraps. The C export needs a live apprt
+// Surface, so these validate the load-bearing behavior directly at the
+// Terminal level via the exact primitive the export calls (printString ->
+// print/linefeed/index/cursorDownScroll). Scroll-into-scrollback is also
+// covered upstream by Screen.zig "Screen read and write scrollback".
+//
+// NOTE: these run only when this file is included in the test target (the
+// libghostty/apprt build). If your default `zig build test` covers only the
+// core terminal suite, lift these two blocks into that suite unchanged; they
+// edit no upstream logic and call only stable pub methods.
+
+test "write_scrollback primitive: printString scrolls into scrollback" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var t = try terminal.Terminal.init(alloc, .{
+        .cols = 8,
+        .rows = 2,
+        .max_scrollback = 1000,
+    });
+    defer t.deinit(alloc);
+
+    // Three lines into a two-row screen: "line1" must scroll into scrollback.
+    try t.printString("line1\nline2\nline3");
+
+    const screen = t.screens.active;
+
+    // Full screen (active + scrollback) retains all three lines.
+    const all = try screen.dumpStringAlloc(alloc, .{ .screen = .{} });
+    defer alloc.free(all);
+    try testing.expect(std.mem.indexOf(u8, all, "line1") != null);
+    try testing.expect(std.mem.indexOf(u8, all, "line3") != null);
+
+    // The active viewport (two rows) shows only the last two lines, proving
+    // the earlier line left the viewport and landed in history, not just
+    // filled the visible grid.
+    const active = try screen.dumpStringAlloc(alloc, .{ .active = .{} });
+    defer alloc.free(active);
+    try testing.expect(std.mem.indexOf(u8, active, "line1") == null);
+    try testing.expect(std.mem.indexOf(u8, active, "line3") != null);
+}
+
+test "write_scrollback primitive: integrity under wide + combining + multiline" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var t = try terminal.Terminal.init(alloc, .{
+        .cols = 16,
+        .rows = 4,
+        .max_scrollback = 1000,
+    });
+    defer t.deinit(alloc);
+
+    // Combining mark, CJK wide chars, and newlines. In a debug build,
+    // Terminal.print's `defer assertIntegrity()` validates page state on every
+    // codepoint; this asserts the multi-line wide/grapheme write completes
+    // cleanly and the trailing ASCII anchor is laid.
+    try t.printString("A\u{0301}B\n\u{4E16}\u{754C}\nZ");
+
+    const screen = t.screens.active;
+    const str = try screen.dumpStringAlloc(alloc, .{ .screen = .{} });
+    defer alloc.free(str);
+    try testing.expect(std.mem.indexOf(u8, str, "Z") != null);
+}

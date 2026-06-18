@@ -1,0 +1,5 @@
+# Resources/ — staged at release time
+#
+# This directory is empty on `main`. Tag commits populate it via
+# `scripts/release.sh`. Consumers always check out tagged versions,
+# so they see the populated form.

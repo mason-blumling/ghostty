@@ -641,6 +641,13 @@ pub fn focusGained(self: *Termio, td: *ThreadData, focused: bool) !void {
 /// call with pty data but it is also called by the read thread when using
 /// an exec subprocess.
 pub fn processOutput(self: *Termio, buf: []const u8) void {
+    // Tee the raw PTY bytes to any registered embedder callback before
+    // parsing. This is used by the embedded apprt C API to mirror the
+    // byte stream to external consumers (e.g. remote terminal clients).
+    if (self.surface_mailbox.surface.pty_data_cb) |cb| {
+        cb(self.surface_mailbox.surface.pty_data_cb_userdata, buf.ptr, buf.len);
+    }
+
     // We are modifying terminal state from here on out and we need
     // the lock to grab our read data.
     self.renderer_state.mutex.lock();

@@ -1,0 +1,31 @@
+{
+  "version": "1.0.0",
+  "baseBranch": "1ece619da2660cb7ec05df807e6722e4d7f90380",
+  "generatedAt": "2026-05-09T00:30:22.000Z",
+  "changedFiles": [
+    ".gitignore",
+    ".understand-anything/fingerprints.json",
+    ".understand-anything/knowledge-graph.json",
+    ".understand-anything/meta.json",
+    "docs/CONSUMING.md",
+    "docs/known-quirks.md",
+    "docs/release-runbook.md",
+    "docs/swift-package-plan.md"
+  ],
+  "changedNodeIds": [
+    "config:.gitignore",
+    "document:docs/CONSUMING.md",
+    "document:docs/known-quirks.md",
+    "document:docs/release-runbook.md",
+    "document:docs/swift-package-plan.md"
+  ],
+  "affectedNodeIds": [
+    "config:Package.swift",
+    "document:README.md",
+    "file:Sources/Ghostty/Bootstrap.swift",
+    "file:Sources/Ghostty/Resources/.gitkeep",
+    "file:Tests/GhosttyTests/GhosttyTests.swift",
+    "file:scripts/release.sh",
+    "pipeline:.github/workflows/build-ghosttykit.yml"
+  ]
+}

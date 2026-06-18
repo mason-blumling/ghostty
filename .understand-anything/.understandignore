@@ -1,0 +1,64 @@
+# .understandignore — patterns for files/dirs to exclude from analysis
+# Syntax: same as .gitignore (globs, # comments, ! negation, trailing / for dirs)
+#
+# Built-in defaults (always excluded unless negated):
+#   node_modules/, .git/, dist/, build/, obj/, *.lock, *.min.js, etc.
+#
+
+# --- Build artifacts / caches ---
+zig-cache/
+.zig-cache/
+zig-out/
+build-cmake/
+CMakeCache.txt
+CMakeFiles/
+.flatpak-builder/
+result*
+.nixos-test-history
+*.wasm
+*.qcow2
+vgcore.*
+
+# --- Translations (i18n resource files, not architecture) ---
+po/
+
+# --- Vendored C library wrappers (build shims, not ghostty code) ---
+pkg/
+
+# --- Packaging configs (Linux distros) ---
+flatpak/
+snap/
+nix/
+
+# --- Assets / test fixtures / examples ---
+images/
+test/
+test_align
+example/
+macos/ServiceExtensions/
+
+# --- Inactive / auto-generated ---
+build.zig.zon.txt
+build.zig.zon.nix
+build.zig.zon.json
+DoxygenLayout.xml
+Doxyfile
+valgrind.supp
+typos.toml
+
+# --- Agent / AI config (meta, not architecture) ---
+.agents/
+AGENTS.md
+
+# --- Misc dotfiles ---
+.DS_Store
+.swiftlint.yml
+.clang-format
+.shellcheckrc
+.gitattributes
+.mailmap
+.prettierignore
+
+# --- Optional: uncomment to exclude ---
+# *.test.*
+# *.spec.*
